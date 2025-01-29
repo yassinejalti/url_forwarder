@@ -2,7 +2,9 @@ from flask import Flask, request, Response, jsonify
 import requests
 from io import BytesIO
 from flask_cors import CORS
+import random
 import logging
+import time
 
 # Setup Flask
 app = Flask(__name__)
@@ -10,6 +12,23 @@ CORS(app)
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
+
+# List of user-agents to rotate
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/88.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/537.36"
+]
+
+def get_random_headers():
+    """Generate random headers to avoid detection."""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/pdf,application/json;q=0.9,image/webp,*/*;q=0.8",
+        "DNT": "1",  # Do Not Track
+        "Upgrade-Insecure-Requests": "1"
+    }
 
 @app.route('/', methods=['GET'])
 def index():
@@ -19,56 +38,42 @@ def index():
 @app.route('/download-pdf', methods=['GET'])
 def download_pdf():
     try:
-        logging.info("Received request for PDF download.")
-        
         pdf_url = request.args.get('pdf_url')
 
         if not pdf_url:
             logging.warning("Missing 'pdf_url' query parameter.")
-            return jsonify({"error": "PDF URL is required as a query parameter (e.g., ?pdf_url=...)"}), 400
+            return jsonify({"error": "PDF URL is required"}), 400
 
-        logging.info(f"Fetching PDF from URL: {pdf_url}")
-        response = requests.get(pdf_url, stream=True)
+        logging.info(f"Attempting to fetch PDF from: {pdf_url}")
 
-        logging.info(f"Received response: Status Code = {response.status_code}")
-        logging.debug(f"Response Headers: {response.headers}")
+        for attempt in range(3):  # Retry up to 3 times
+            try:
+                headers = get_random_headers()
+                logging.info(f"Attempt {attempt + 1}: Using headers: {headers}")
 
-        if response.status_code != 200:
-            logging.error(f"Failed to fetch PDF. Status code: {response.status_code}")
-            return jsonify({"error": f"Failed to fetch PDF: {response.status_code}"}), response.status_code
+                response = requests.get(pdf_url, headers=headers, stream=True, timeout=10)
 
-        # Check response content type
-        content_type = response.headers.get('Content-Type', '')
-        logging.info(f"Response Content-Type: {content_type}")
+                if response.status_code == 200 and 'pdf' in response.headers.get('Content-Type', '').lower():
+                    logging.info("PDF successfully fetched!")
+                    pdf_bytes = BytesIO(response.content)
+                    return Response(
+                        pdf_bytes.getvalue(),
+                        mimetype='application/pdf',
+                        headers={"Content-Disposition": 'inline; filename="displayed-pdf.pdf"'}
+                    )
 
-        if 'pdf' not in content_type.lower():
-            logging.warning("Response is not a valid PDF.")
-            return jsonify({"error": "The requested URL did not return a PDF."}), 400
+                logging.warning(f"Failed attempt {attempt + 1}, Status: {response.status_code}")
 
-        # Debug response content length
-        content_length = response.headers.get('Content-Length', 'Unknown')
-        logging.info(f"Response Content-Length: {content_length}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Request failed: {e}")
 
-        pdf_bytes = BytesIO(response.content)
+            time.sleep(random.uniform(1, 3))  # Random delay before retry
 
-        logging.info("Successfully fetched and processed the PDF.")
-
-        return Response(
-            pdf_bytes.getvalue(),
-            mimetype='application/pdf',
-            headers={
-                'Content-Disposition': 'inline; filename="displayed-pdf.pdf"',
-                'Content-Type': 'application/pdf'
-            }
-        )
-
-    except requests.exceptions.RequestException as req_err:
-        logging.error(f"RequestException occurred: {str(req_err)}")
-        return jsonify({"error": f"Request failed: {str(req_err)}"}), 500
+        return jsonify({"error": "Failed to fetch PDF after multiple attempts"}), 500
 
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
-        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+        logging.error(f"Unexpected error: {e}", exc_info=True)
+        return jsonify({"error": "Server error"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=True)
